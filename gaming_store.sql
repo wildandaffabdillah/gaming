@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1
--- Generation Time: Apr 13, 2025 at 07:59 PM
+-- Generation Time: Apr 28, 2025 at 06:12 PM
 -- Server version: 10.4.32-MariaDB
 -- PHP Version: 8.2.12
 
@@ -20,6 +20,86 @@ SET time_zone = "+00:00";
 --
 -- Database: `gaming_store`
 --
+
+DELIMITER $$
+--
+-- Procedures
+--
+CREATE DEFINER=`root`@`localhost` PROCEDURE `AddFlashSale` (IN `p_product_id` INT, IN `p_discount` INT, IN `p_stock` INT, IN `p_start_time` DATETIME, IN `p_end_time` DATETIME)   BEGIN
+    DECLARE product_exists INT;
+    DECLARE overlapping_sale INT;
+    
+    SELECT COUNT(*) INTO product_exists
+    FROM products WHERE id = p_product_id;
+    
+    IF product_exists = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Product does not exist';
+    END IF;
+    
+    IF p_discount < 0 OR p_discount > 100 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Discount must be between 0 and 100';
+    END IF;
+    
+    IF p_stock < 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Stock cannot be negative';
+    END IF;
+    
+    IF p_end_time <= p_start_time THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'End time must be after start time';
+    END IF;
+    
+    SELECT COUNT(*) INTO overlapping_sale
+    FROM flash_sales
+    WHERE product_id = p_product_id
+    AND ((p_start_time <= end_time AND p_end_time >= start_time)
+         OR (start_time <= p_end_time AND end_time >= p_start_time));
+    
+    IF overlapping_sale > 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Overlapping flash sale exists';
+    END IF;
+    
+    INSERT INTO flash_sales (product_id, discount, stock, start_time, end_time)
+    VALUES (p_product_id, p_discount, p_stock, p_start_time, p_end_time);
+END$$
+
+CREATE DEFINER=`root`@`localhost` PROCEDURE `AddProduct` (IN `p_seller_id` INT, IN `p_name` VARCHAR(255), IN `p_category` VARCHAR(100), IN `p_price` DECIMAL(10,2), IN `p_discount` INT, IN `p_description` TEXT, IN `p_image_path` VARCHAR(255), OUT `p_product_id` INT)   BEGIN
+    INSERT INTO Products (seller_id, name, category, price, discount, description, image_path)
+    VALUES (p_seller_id, p_name, p_category, p_price, p_discount, p_description, p_image_path);
+    SET p_product_id = LAST_INSERT_ID();
+END$$
+
+CREATE DEFINER=`root`@`localhost` PROCEDURE `CreateOrder` (IN `p_user_id` INT, IN `p_name` VARCHAR(100), IN `p_address` TEXT, IN `p_phone` VARCHAR(20), IN `p_payment_method` INT, IN `p_total_amount` DECIMAL(10,2))   BEGIN
+    DECLARE v_order_id INT;
+    
+    -- Mulai transaksi
+    START TRANSACTION;
+    
+    -- Buat order
+    INSERT INTO orders (user_id, name, address, phone, payment_method, total_amount, status, created_at)
+    VALUES (p_user_id, p_name, p_address, p_phone, p_payment_method, p_total_amount, 'pending', NOW());
+    
+    SET v_order_id = LAST_INSERT_ID();
+    
+    -- Pindahkan item dari cart ke order_details
+    INSERT INTO order_details (order_id, product_id, quantity, price)
+    SELECT v_order_id, c.product_id, c.quantity, p.price
+    FROM cart c
+    JOIN products p ON c.product_id = p.id
+    WHERE c.user_id = p_user_id;
+    
+    -- Kosongkan cart
+    DELETE FROM cart WHERE user_id = p_user_id;
+    
+    -- Commit transaksi
+    COMMIT;
+END$$
+
+DELIMITER ;
 
 -- --------------------------------------------------------
 
@@ -44,6 +124,16 @@ INSERT INTO `ads` (`id`, `product_id`, `image_path`, `created_at`) VALUES
 -- --------------------------------------------------------
 
 --
+-- Table structure for table `buyers`
+--
+
+CREATE TABLE `buyers` (
+  `user_id` int(11) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
 -- Table structure for table `cart`
 --
 
@@ -53,6 +143,56 @@ CREATE TABLE `cart` (
   `product_id` int(11) NOT NULL,
   `quantity` int(11) NOT NULL DEFAULT 1,
   `created_at` timestamp NOT NULL DEFAULT current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+--
+-- Dumping data for table `cart`
+--
+
+INSERT INTO `cart` (`id`, `user_id`, `product_id`, `quantity`, `created_at`) VALUES
+(7, 4, 3, 1, '2025-04-28 01:41:20'),
+(8, 4, 2, 1, '2025-04-28 01:41:26'),
+(9, 4, 9, 1, '2025-04-28 01:45:01');
+
+--
+-- Triggers `cart`
+--
+DELIMITER $$
+CREATE TRIGGER `after_cart_insert` AFTER INSERT ON `cart` FOR EACH ROW BEGIN
+    DECLARE flash_sale_id INT;
+    DECLARE current_stock INT;
+    
+    -- Cek apakah produk dalam flash sale
+    SELECT id, stock INTO flash_sale_id, current_stock
+    FROM flash_sales
+    WHERE product_id = NEW.product_id
+    AND NOW() BETWEEN start_time AND end_time
+    LIMIT 1;
+    
+    IF flash_sale_id IS NOT NULL THEN
+        IF current_stock >= NEW.quantity THEN
+            UPDATE flash_sales
+            SET stock = stock - NEW.quantity
+            WHERE id = flash_sale_id;
+        ELSE
+            SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Insufficient stock for flash sale';
+        END IF;
+    END IF;
+END
+$$
+DELIMITER ;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `categories`
+--
+
+CREATE TABLE `categories` (
+  `id` int(11) NOT NULL,
+  `name` varchar(50) NOT NULL,
+  `parent_id` int(11) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- --------------------------------------------------------
@@ -119,7 +259,7 @@ CREATE TABLE `orders` (
   `name` varchar(100) NOT NULL,
   `address` text NOT NULL,
   `phone` varchar(20) NOT NULL,
-  `payment_method` enum('bank_transfer','credit_card','cod') NOT NULL,
+  `payment_method` int(11) DEFAULT NULL,
   `total_amount` decimal(10,2) NOT NULL,
   `status` enum('pending','completed','cancelled') DEFAULT 'pending',
   `created_at` timestamp NOT NULL DEFAULT current_timestamp()
@@ -130,11 +270,51 @@ CREATE TABLE `orders` (
 --
 
 INSERT INTO `orders` (`id`, `user_id`, `name`, `address`, `phone`, `payment_method`, `total_amount`, `status`, `created_at`) VALUES
-(1, 1, 'Wildan Daffa abdillah', 'Kp. Malang mengah Desa sukasari Rt/Rw 001/001 Kec. cipanas Kab. Lebak Prov. Banten', '089505845227', 'bank_transfer', 15000000.00, 'pending', '2025-03-24 03:26:52'),
-(2, 1, 'kaila shafa', 'Kp. Malang mengah Desa sukasari Rt/Rw 001/001 Kec. cipanas Kab. Lebak Prov. Banten', '081398121908', 'cod', 15000000.00, 'pending', '2025-03-24 03:37:37'),
-(3, 1, 'kaila shafa', 'Kp. Malang mengah Desa sukasari Rt/Rw 001/001 Kec. cipanas Kab. Lebak Prov. Banten', '081398121908', 'cod', 15000000.00, 'pending', '2025-03-24 03:39:28'),
-(4, 1, 'kaila shafa', 'al', '081398121908', 'cod', 67000000.00, 'pending', '2025-03-24 15:31:22'),
-(5, 1, 'Wildan Daffa abdillah', 'Kp. Malang mengah Desa sukasari Rt/Rw 001/001 Kec. cipanas Kab. Lebak Prov. Banten', '089505845227', 'bank_transfer', 41000000.00, 'pending', '2025-03-24 16:20:48');
+(1, 1, 'Wildan Daffa abdillah', 'Kp. Malang mengah Desa sukasari Rt/Rw 001/001 Kec. cipanas Kab. Lebak Prov. Banten', '089505845227', 1, 15000000.00, 'pending', '2025-03-24 03:26:52'),
+(2, 1, 'kaila shafa', 'Kp. Malang mengah Desa sukasari Rt/Rw 001/001 Kec. cipanas Kab. Lebak Prov. Banten', '081398121908', 3, 15000000.00, 'pending', '2025-03-24 03:37:37'),
+(3, 1, 'kaila shafa', 'Kp. Malang mengah Desa sukasari Rt/Rw 001/001 Kec. cipanas Kab. Lebak Prov. Banten', '081398121908', 3, 15000000.00, 'pending', '2025-03-24 03:39:28'),
+(4, 1, 'kaila shafa', 'al', '081398121908', 3, 67000000.00, 'pending', '2025-03-24 15:31:22'),
+(5, 1, 'Wildan Daffa abdillah', 'Kp. Malang mengah Desa sukasari Rt/Rw 001/001 Kec. cipanas Kab. Lebak Prov. Banten', '089505845227', 1, 41000000.00, 'pending', '2025-03-24 16:20:48');
+
+--
+-- Triggers `orders`
+--
+DELIMITER $$
+CREATE TRIGGER `after_order_insert` AFTER INSERT ON `orders` FOR EACH ROW BEGIN
+    DECLARE seller_id INT;
+    DECLARE product_id INT;
+    DECLARE product_name VARCHAR(100);
+    
+    -- Ambil product_id dari order_details
+    SELECT product_id INTO product_id
+    FROM order_details
+    WHERE order_id = NEW.id
+    LIMIT 1;
+    
+    -- Ambil seller_id dan nama produk
+    SELECT seller_id, name INTO seller_id, product_name
+    FROM products
+    WHERE id = product_id;
+    
+    -- Notifikasi untuk pembeli
+    INSERT INTO notifications (user_id, message, created_at)
+    VALUES (NEW.user_id, CONCAT('Your order (Order ID: ', NEW.id, ') has been placed successfully.'), NOW());
+    
+    -- Notifikasi untuk penjual
+    INSERT INTO notifications (user_id, message, created_at)
+    VALUES (seller_id, CONCAT('Your product ', product_name, ' has been purchased by a buyer (Order ID: ', NEW.id, ').'), NOW());
+END
+$$
+DELIMITER ;
+DELIMITER $$
+CREATE TRIGGER `after_order_update` AFTER UPDATE ON `orders` FOR EACH ROW BEGIN
+    IF OLD.status != NEW.status THEN
+        INSERT INTO order_logs (order_id, status, changed_at)
+        VALUES (NEW.id, NEW.status, NOW());
+    END IF;
+END
+$$
+DELIMITER ;
 
 -- --------------------------------------------------------
 
@@ -165,6 +345,39 @@ INSERT INTO `order_details` (`id`, `order_id`, `product_id`, `quantity`, `price`
 -- --------------------------------------------------------
 
 --
+-- Table structure for table `order_logs`
+--
+
+CREATE TABLE `order_logs` (
+  `id` int(11) NOT NULL,
+  `order_id` int(11) DEFAULT NULL,
+  `status` varchar(50) DEFAULT NULL,
+  `changed_at` timestamp NOT NULL DEFAULT current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `payment_methods`
+--
+
+CREATE TABLE `payment_methods` (
+  `id` int(11) NOT NULL,
+  `name` varchar(50) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+--
+-- Dumping data for table `payment_methods`
+--
+
+INSERT INTO `payment_methods` (`id`, `name`) VALUES
+(1, 'bank_transfer'),
+(2, 'credit_card'),
+(3, 'cod');
+
+-- --------------------------------------------------------
+
+--
 -- Table structure for table `products`
 --
 
@@ -184,7 +397,7 @@ CREATE TABLE `products` (
 --
 
 INSERT INTO `products` (`id`, `seller_id`, `name`, `category`, `price`, `description`, `created_at`, `discount`) VALUES
-(1, 2, 'RTX 4090', 'vga', 15000000.00, '', '2025-03-24 02:26:46', 80),
+(1, 2, 'RTX 4090', '', 15000000.00, '', '2025-03-24 02:26:46', 80),
 (2, 2, 'Kursi gaming RGC101', 'gaming_chair', 7000000.00, '', '2025-03-24 15:22:54', 0),
 (3, 2, 'Kursi gaming EOC 5029', 'gaming_chair', 6500000.00, '', '2025-03-24 15:23:46', 0),
 (4, 2, 'Huawei matebook D15', 'laptop', 11000000.00, '', '2025-03-24 15:25:18', 0),
@@ -263,6 +476,35 @@ INSERT INTO `ratings` (`id`, `product_id`, `user_id`, `rating`, `review`, `creat
 -- --------------------------------------------------------
 
 --
+-- Table structure for table `sellers`
+--
+
+CREATE TABLE `sellers` (
+  `user_id` int(11) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `seller_details`
+--
+
+CREATE TABLE `seller_details` (
+  `seller_id` int(11) NOT NULL,
+  `store_name` varchar(100) DEFAULT NULL,
+  `store_address` text DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+--
+-- Dumping data for table `seller_details`
+--
+
+INSERT INTO `seller_details` (`seller_id`, `store_name`, `store_address`) VALUES
+(2, NULL, NULL);
+
+-- --------------------------------------------------------
+
+--
 -- Table structure for table `users`
 --
 
@@ -271,19 +513,18 @@ CREATE TABLE `users` (
   `username` varchar(50) NOT NULL,
   `password` varchar(255) NOT NULL,
   `role` enum('buyer','seller') NOT NULL,
-  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
-  `store_name` varchar(100) DEFAULT NULL,
-  `store_address` text DEFAULT NULL
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
 -- Dumping data for table `users`
 --
 
-INSERT INTO `users` (`id`, `username`, `password`, `role`, `created_at`, `store_name`, `store_address`) VALUES
-(1, 'wildan', '$2y$10$74PgMD6Y4IVq1ofznsOxkuS19ChCfsYCbEd58W7e2T5qMlZJrjbvq', 'buyer', '2025-03-24 02:25:27', 'jeremi', 'Jl. Teknologi No. 123, Jakarta'),
-(2, 'jeremi', '$2y$10$2IQ0NFcO7Q21wR9ydLKRD.9eJB.F3.njnikTU1VU/ChZVmbGGa3li', 'seller', '2025-03-24 02:25:54', NULL, NULL),
-(3, 'daffa', '$2y$10$btNMmY7WJf31PjOqCfNAsOUA6Y.CxCP57gvUPTdHQ2hN6alszgFw6', 'buyer', '2025-04-06 13:32:45', NULL, NULL);
+INSERT INTO `users` (`id`, `username`, `password`, `role`, `created_at`) VALUES
+(1, 'wildan', '$2y$10$74PgMD6Y4IVq1ofznsOxkuS19ChCfsYCbEd58W7e2T5qMlZJrjbvq', 'buyer', '2025-03-24 02:25:27'),
+(2, 'jeremi', '$2y$10$2IQ0NFcO7Q21wR9ydLKRD.9eJB.F3.njnikTU1VU/ChZVmbGGa3li', 'seller', '2025-03-24 02:25:54'),
+(3, 'daffa', '$2y$10$btNMmY7WJf31PjOqCfNAsOUA6Y.CxCP57gvUPTdHQ2hN6alszgFw6', 'buyer', '2025-04-06 13:32:45'),
+(4, 'danu', '$2y$10$2t.kYg4sqJbVP5qBU8WgRuy1JNQ5ENm9IremcyYF11oEEFaAPp1xS', 'buyer', '2025-04-28 01:41:03');
 
 -- --------------------------------------------------------
 
@@ -310,12 +551,25 @@ ALTER TABLE `ads`
   ADD KEY `product_id` (`product_id`);
 
 --
+-- Indexes for table `buyers`
+--
+ALTER TABLE `buyers`
+  ADD PRIMARY KEY (`user_id`);
+
+--
 -- Indexes for table `cart`
 --
 ALTER TABLE `cart`
   ADD PRIMARY KEY (`id`),
   ADD KEY `user_id` (`user_id`),
   ADD KEY `product_id` (`product_id`);
+
+--
+-- Indexes for table `categories`
+--
+ALTER TABLE `categories`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `parent_id` (`parent_id`);
 
 --
 -- Indexes for table `flash_sales`
@@ -336,7 +590,8 @@ ALTER TABLE `notifications`
 --
 ALTER TABLE `orders`
   ADD PRIMARY KEY (`id`),
-  ADD KEY `user_id` (`user_id`);
+  ADD KEY `user_id` (`user_id`),
+  ADD KEY `payment_method` (`payment_method`);
 
 --
 -- Indexes for table `order_details`
@@ -344,7 +599,20 @@ ALTER TABLE `orders`
 ALTER TABLE `order_details`
   ADD PRIMARY KEY (`id`),
   ADD KEY `order_id` (`order_id`),
-  ADD KEY `product_id` (`product_id`);
+  ADD KEY `idx_order_details_product_id` (`product_id`);
+
+--
+-- Indexes for table `order_logs`
+--
+ALTER TABLE `order_logs`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `order_id` (`order_id`);
+
+--
+-- Indexes for table `payment_methods`
+--
+ALTER TABLE `payment_methods`
+  ADD PRIMARY KEY (`id`);
 
 --
 -- Indexes for table `products`
@@ -376,6 +644,18 @@ ALTER TABLE `ratings`
   ADD KEY `user_id` (`user_id`);
 
 --
+-- Indexes for table `sellers`
+--
+ALTER TABLE `sellers`
+  ADD PRIMARY KEY (`user_id`);
+
+--
+-- Indexes for table `seller_details`
+--
+ALTER TABLE `seller_details`
+  ADD PRIMARY KEY (`seller_id`);
+
+--
 -- Indexes for table `users`
 --
 ALTER TABLE `users`
@@ -404,7 +684,13 @@ ALTER TABLE `ads`
 -- AUTO_INCREMENT for table `cart`
 --
 ALTER TABLE `cart`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=7;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=10;
+
+--
+-- AUTO_INCREMENT for table `categories`
+--
+ALTER TABLE `categories`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
 -- AUTO_INCREMENT for table `flash_sales`
@@ -429,6 +715,18 @@ ALTER TABLE `orders`
 --
 ALTER TABLE `order_details`
   MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=7;
+
+--
+-- AUTO_INCREMENT for table `order_logs`
+--
+ALTER TABLE `order_logs`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
+
+--
+-- AUTO_INCREMENT for table `payment_methods`
+--
+ALTER TABLE `payment_methods`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=4;
 
 --
 -- AUTO_INCREMENT for table `products`
@@ -458,7 +756,7 @@ ALTER TABLE `ratings`
 -- AUTO_INCREMENT for table `users`
 --
 ALTER TABLE `users`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=4;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=5;
 
 --
 -- AUTO_INCREMENT for table `wishlist`
@@ -477,11 +775,23 @@ ALTER TABLE `ads`
   ADD CONSTRAINT `ads_ibfk_1` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`);
 
 --
+-- Constraints for table `buyers`
+--
+ALTER TABLE `buyers`
+  ADD CONSTRAINT `buyers_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE;
+
+--
 -- Constraints for table `cart`
 --
 ALTER TABLE `cart`
   ADD CONSTRAINT `cart_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`),
   ADD CONSTRAINT `cart_ibfk_2` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`);
+
+--
+-- Constraints for table `categories`
+--
+ALTER TABLE `categories`
+  ADD CONSTRAINT `categories_ibfk_1` FOREIGN KEY (`parent_id`) REFERENCES `categories` (`id`) ON DELETE SET NULL;
 
 --
 -- Constraints for table `flash_sales`
@@ -499,7 +809,8 @@ ALTER TABLE `notifications`
 -- Constraints for table `orders`
 --
 ALTER TABLE `orders`
-  ADD CONSTRAINT `orders_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`);
+  ADD CONSTRAINT `orders_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`),
+  ADD CONSTRAINT `orders_ibfk_2` FOREIGN KEY (`payment_method`) REFERENCES `payment_methods` (`id`);
 
 --
 -- Constraints for table `order_details`
@@ -507,6 +818,12 @@ ALTER TABLE `orders`
 ALTER TABLE `order_details`
   ADD CONSTRAINT `order_details_ibfk_1` FOREIGN KEY (`order_id`) REFERENCES `orders` (`id`),
   ADD CONSTRAINT `order_details_ibfk_2` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`);
+
+--
+-- Constraints for table `order_logs`
+--
+ALTER TABLE `order_logs`
+  ADD CONSTRAINT `order_logs_ibfk_1` FOREIGN KEY (`order_id`) REFERENCES `orders` (`id`);
 
 --
 -- Constraints for table `products`
@@ -532,6 +849,18 @@ ALTER TABLE `promos`
 ALTER TABLE `ratings`
   ADD CONSTRAINT `ratings_ibfk_1` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`),
   ADD CONSTRAINT `ratings_ibfk_2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`);
+
+--
+-- Constraints for table `sellers`
+--
+ALTER TABLE `sellers`
+  ADD CONSTRAINT `sellers_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE;
+
+--
+-- Constraints for table `seller_details`
+--
+ALTER TABLE `seller_details`
+  ADD CONSTRAINT `seller_details_ibfk_1` FOREIGN KEY (`seller_id`) REFERENCES `users` (`id`) ON DELETE CASCADE;
 
 --
 -- Constraints for table `wishlist`
